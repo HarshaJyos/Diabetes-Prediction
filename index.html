@@ -12,10 +12,24 @@
     input, select, button { width: 100%; padding: 12px; margin: 8px 0; font-size: 16px; border: 1px solid #ced4da; border-radius: 6px; }
     button { background: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; }
     button:hover { background: #0056b3; }
-    #result { margin-top: 20px; padding: 15px; border-radius: 6px; font-weight: bold; text-align: center; }
+    #result { margin-top: 20px; padding: 15px; border-radius: 6px; font-weight: bold; text-align: center; min-height: 50px; }
     .yes { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
     .no { background: #e8f5e8; color: #2e7d32; border: 1px solid #c8e6c9; }
-    .loading { color: #007bff; }
+    .loading { color: #007bff; display: flex; align-items: center; justify-content: center; gap: 10px; }
+
+    /* Spinner */
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #007bff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
@@ -34,57 +48,59 @@
 
     <button type="submit">Predict</button>
   </form>
-  <div id="result" class="loading">Loading model...</div>
+
+  <!-- Result + Loader -->
+  <div id="result" class="loading">
+    <div class="spinner"></div>
+    <span>Loading model...</span>
+  </div>
 
   <script type="text/javascript">
-    // === 1. Load all .pkl files as base64 ===
+    // === 1. Load .pkl as base64 ===
     async function loadPklBase64(filename) {
       const resp = await fetch(filename);
       if (!resp.ok) throw new Error(`404: ${filename} not found`);
       const blob = await resp.blob();
       return new Promise((resolve) => {
         const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]); // base64 part
+        reader.onload = () => resolve(reader.result.split(',')[1]);
         reader.readAsDataURL(blob);
       });
     }
 
-    // === 2. Main Pyodide setup ===
+    // === 2. Main setup ===
     let pyodide, predictFn, genderOptions;
 
     async function main() {
       const resultDiv = document.getElementById("result");
-      resultDiv.textContent = "Loading Pyodide...";
 
-      pyodide = await loadPyodide();
-      await pyodide.loadPackage(["micropip", "numpy"]);
-      const micropip = pyodide.pyimport("micropip");
-      await micropip.install("scikit-learn");
+      try {
+        resultDiv.innerHTML = `<div class="spinner"></div><span>Loading Pyodide...</span>`;
 
-      resultDiv.textContent = "Loading model files...";
+        pyodide = await loadPyodide();
+        await pyodide.loadPackage(["micropip", "numpy"]);
+        const micropip = pyodide.pyimport("micropip");
+        await micropip.install("scikit-learn");
 
-      // Load all .pkl as base64
-      const [modelB64, scalerB64, leGenderB64, meansB64] = await Promise.all([
-        loadPklBase64("diabetes_model.pkl"),
-        loadPklBase64("scaler.pkl"),
-        loadPklBase64("le_gender.pkl"),
-        loadPklBase64("column_means.pkl")
-      ]);
+        resultDiv.innerHTML = `<div class="spinner"></div><span>Loading model files...</span>`;
 
-      // === 3. Python code to load models ===
-      const pythonCode = `
+        const [modelB64, scalerB64, leGenderB64, meansB64] = await Promise.all([
+          loadPklBase64("diabetes_model.pkl"),
+          loadPklBase64("scaler.pkl"),
+          loadPklBase64("le_gender.pkl"),
+          loadPklBase64("column_means.pkl")
+        ]);
+
+        const pythonCode = `
 import joblib, numpy as np, io, base64
 
-# Decode base64 to bytes
-def decode(b64):
-    return base64.b64decode(b64)
+def decode(b64): return base64.b64decode(b64)
 
 model = joblib.load(io.BytesIO(decode("${modelB64}")))
 scaler = joblib.load(io.BytesIO(decode("${scalerB64}")))
 le_gender = joblib.load(io.BytesIO(decode("${leGenderB64}")))
 means = joblib.load(io.BytesIO(decode("${meansB64}")))
 
-# Export gender options
 gender_options = [str(g).strip().upper() for g in le_gender.classes_]
 
 def predict_diabetes(age, gender, hba1c):
@@ -104,34 +120,39 @@ def predict_diabetes(age, gender, hba1c):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# Make available to JS
 predict_diabetes, gender_options
-      `;
+        `;
 
-      pyodide.runPython(pythonCode);
+        const [predictPy, genderPy] = pyodide.runPython(pythonCode);
+        window.predict = predictPy;
+        genderOptions = genderPy.toJs();
 
-      window.predict = pyodide.globals.get("predict_diabetes");
-      genderOptions = pyodide.globals.get("gender_options").toJs();
+        // Populate gender
+        const genderSelect = document.getElementById("gender");
+        genderSelect.innerHTML = "";
+        genderOptions.forEach(g => {
+          const opt = document.createElement("option");
+          opt.value = g;
+          opt.textContent = g;
+          genderSelect.appendChild(opt);
+        });
 
-      // === 4. Populate gender dropdown ===
-      const genderSelect = document.getElementById("gender");
-      genderSelect.innerHTML = ""; // clear
-      genderOptions.forEach(g => {
-        const opt = document.createElement("option");
-        opt.value = g;
-        opt.textContent = g;
-        genderSelect.appendChild(opt);
-      });
+        resultDiv.innerHTML = "Ready! Enter values and predict.";
+        resultDiv.className = "";
 
-      resultDiv.textContent = "Ready! Enter values and predict.";
-      resultDiv.className = "";
+      } catch (err) {
+        resultDiv.innerHTML = `Init failed: ${err.message}`;
+        resultDiv.className = "";
+      }
     }
 
-    // === 5. Form submit ===
+    // === 3. Prediction with spinner ===
     document.getElementById("predictForm").onsubmit = async (e) => {
       e.preventDefault();
       const resultDiv = document.getElementById("result");
-      resultDiv.textContent = "Predicting...";
+
+      // Show spinner
+      resultDiv.innerHTML = `<div class="spinner"></div><span>Predicting...</span>`;
       resultDiv.className = "loading";
 
       try {
@@ -140,18 +161,19 @@ predict_diabetes, gender_options
         const hba1c = parseFloat(document.getElementById("hba1c").value);
 
         const prediction = window.predict(age, gender, hba1c);
-        resultDiv.textContent = `Diabetes: ${prediction}`;
-        resultDiv.className = prediction.includes("Yes") ? "yes" : "no";
+
+        // Show result
+        resultDiv.innerHTML = `Diabetes: ${prediction}`;
+        resultDiv.className = prediction === "Yes" ? "yes" : "no";
+
       } catch (err) {
-        resultDiv.textContent = `Error: ${err.message}`;
+        resultDiv.innerHTML = `Error: ${err.message}`;
         resultDiv.className = "";
       }
     };
 
     // Start
-    main().catch(err => {
-      document.getElementById("result").textContent = `Init failed: ${err.message}`;
-    });
+    main();
   </script>
 </body>
 </html>
