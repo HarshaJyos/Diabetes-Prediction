@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Diabetes Risk Predictor</title>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background: #f8f9fa; }
+    h1 { text-align: center; color: #2c3e50; }
+    label { display: block; margin-top: 15px; font-weight: 600; }
+    input, select, button { width: 100%; padding: 12px; margin: 8px 0; font-size: 16px; border: 1px solid #ced4da; border-radius: 6px; }
+    button { background: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; }
+    button:hover { background: #0056b3; }
+    #result { margin-top: 20px; padding: 15px; border-radius: 6px; font-weight: bold; text-align: center; }
+    .yes { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
+    .no { background: #e8f5e8; color: #2e7d32; border: 1px solid #c8e6c9; }
+    .loading { color: #007bff; }
+  </style>
+</head>
+<body>
+  <h1>Diabetes Risk Predictor</h1>
+  <form id="predictForm">
+    <label>Age</label>
+    <input type="number" id="age" min="1" max="120" value="30" required />
+
+    <label>Gender</label>
+    <select id="gender" required></select>
+
+    <label>HbA1c (%)</label>
+    <input type="number" id="hba1c" min="0" max="20" step="0.1" value="5.0" required />
+
+    <button type="submit">Predict</button>
+  </form>
+  <div id="result" class="loading">Loading model...</div>
+
+  <script>
+    let pyodide;
+    let model, scaler, le_gender, means;
+
+    // Load Pyodide + required packages
+    async function main() {
+      pyodide = await loadPyodide();
+      await pyodide.loadPackage(["numpy", "micropip"]);
+      const micropip = pyodide.pyimport("micropip");
+      await micropip.install("scikit-learn");
+
+      // Load .pkl files as base64 (embedded via Python)
+      const files = ['diabetes_model.pkl', 'scaler.pkl', 'le_gender.pkl', 'column_means.pkl'];
+      const loaded = {};
+      for (const f of files) {
+        const resp = await fetch(f);
+        const buffer = new Uint8Array(await resp.arrayBuffer());
+        loaded[f] = buffer;
+      }
+
+      // Run prediction code in Pyodide
+      pyodide.runPython(`
+import joblib, numpy as np, io
+
+# Load from binary
+model = joblib.load(io.BytesIO(${new Uint8Array(loaded['diabetes_model.pkl'])}))
+scaler = joblib.load(io.BytesIO(${new Uint8Array(loaded['scaler.pkl'])}))
+le_gender = joblib.load(io.BytesIO(${new Uint8Array(loaded['le_gender.pkl'])}))
+means = joblib.load(io.BytesIO(${new Uint8Array(loaded['column_means.pkl'])}))
+
+def predict_diabetes(age, gender, hba1c):
+    g_enc = le_gender.transform([gender])[0]
+    row = np.array([[
+        g_enc, age,
+        means['Urea'], means['Cr'],
+        hba1c,
+        means['Chol'], means['TG'],
+        means['HDL'], means['LDL'],
+        means['VLDL'], means['BMI']
+    ]])
+    row_scaled = scaler.transform(row)
+    pred = model.predict(row_scaled)[0]
+    return "Yes" if pred == 1 else "No"
+      `);
+
+      model = pyodide.globals.get("model");
+      scaler = pyodide.globals.get("scaler");
+      le_gender = pyodide.globals.get("le_gender");
+      means = pyodide.globals.get("means");
+      window.predict = pyodide.globals.get("predict_diabetes");
+
+      // Populate gender dropdown
+      const genderSelect = document.getElementById("gender");
+      const classes = le_gender.classes_.toJs();
+      classes.forEach(g => {
+        const opt = document.createElement("option");
+        opt.value = g.toUpperCase();
+        opt.textContent = g.toUpperCase();
+        genderSelect.appendChild(opt);
+      });
+
+      document.getElementById("result").textContent = "Ready! Enter values and predict.";
+      document.getElementById("result").className = "";
+    }
+
+    // Form submit
+    document.getElementById("predictForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const resultDiv = document.getElementById("result");
+      resultDiv.textContent = "Predicting...";
+      resultDiv.className = "loading";
+
+      try {
+        const age = document.getElementById("age").value;
+        const gender = document.getElementById("gender").value;
+        const hba1c = document.getElementById("hba1c").value;
+
+        const prediction = window.predict(age, gender, hba1c);
+        resultDiv.textContent = `Diabetes: ${prediction}`;
+        resultDiv.className = prediction === "Yes" ? "yes" : "no";
+      } catch (err) {
+        resultDiv.textContent = `Error: ${err.message}`;
+        resultDiv.className = "";
+      }
+    };
+
+    // Start loading
+    main();
+  </script>
+</body>
+</html>
