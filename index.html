@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Diabetes Predictor</title>
+  <title>Diabetes Predictor (XGBoost)</title>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background: #f8f9fa; }
@@ -21,7 +21,7 @@
   </style>
 </head>
 <body>
-  <h1>Diabetes Risk Predictor</h1>
+  <h1>Diabetes Risk Predictor (XGBoost)</h1>
   <form id="predictForm">
     <label>Age</label>
     <input type="number" id="age" min="1" max="120" value="30" required />
@@ -56,7 +56,7 @@
       pyodide = await loadPyodide();
       await pyodide.loadPackage(["micropip", "numpy"]);
       const micropip = pyodide.pyimport("micropip");
-      await micropip.install("scikit-learn==1.4.2");  // Match training version
+      await micropip.install(["scikit-learn==1.4.2", "xgboost"]);  // XGBoost support
 
       result.innerHTML = `<div class="spinner"></div><span>Loading model...</span>`;
 
@@ -69,6 +69,7 @@
 
       const code = `
 import joblib, numpy as np, io, base64
+import xgboost as xgb  # Ensure loaded
 def d(b): return base64.b64decode(b)
 model = joblib.load(io.BytesIO(d("${mB64}")))
 scaler = joblib.load(io.BytesIO(d("${sB64}")))
