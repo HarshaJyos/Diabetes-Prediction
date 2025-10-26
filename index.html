@@ -108,9 +108,10 @@ def predict_diabetes(age, gender, hba1c):
 predict_diabetes, gender_options
       `;
 
-      const [predictPy, genderPy] = pyodide.runPython(pythonCode);
-      window.predict = predictPy;
-      genderOptions = genderPy.toJs();
+      pyodide.runPython(pythonCode);
+
+      window.predict = pyodide.globals.get("predict_diabetes");
+      genderOptions = pyodide.globals.get("gender_options").toJs();
 
       // === 4. Populate gender dropdown ===
       const genderSelect = document.getElementById("gender");
@@ -134,9 +135,9 @@ predict_diabetes, gender_options
       resultDiv.className = "loading";
 
       try {
-        const age = document.getElementById("age").value;
+        const age = parseInt(document.getElementById("age").value);
         const gender = document.getElementById("gender").value;
-        const hba1c = document.getElementById("hba1c").value;
+        const hba1c = parseFloat(document.getElementById("hba1c").value);
 
         const prediction = window.predict(age, gender, hba1c);
         resultDiv.textContent = `Diabetes: ${prediction}`;
