@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Diabetes Risk Predictor</title>
+  <title>Diabetes Predictor</title>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background: #f8f9fa; }
@@ -16,20 +16,8 @@
     .yes { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
     .no { background: #e8f5e8; color: #2e7d32; border: 1px solid #c8e6c9; }
     .loading { color: #007bff; display: flex; align-items: center; justify-content: center; gap: 10px; }
-
-    /* Spinner */
-    .spinner {
-      width: 20px;
-      height: 20px;
-      border: 3px solid #f3f3f3;
-      border-top: 3px solid #007bff;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-    }
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
+    .spinner { width: 20px; height: 20px; border: 3px solid #f3f3f3; border-top: 3px solid #007bff; border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -37,143 +25,107 @@
   <form id="predictForm">
     <label>Age</label>
     <input type="number" id="age" min="1" max="120" value="30" required />
-
     <label>Gender</label>
-    <select id="gender" required>
-      <!-- Populated by JS -->
-    </select>
-
+    <select id="gender" required></select>
     <label>HbA1c (%)</label>
     <input type="number" id="hba1c" min="0" max="20" step="0.1" value="5.0" required />
-
     <button type="submit">Predict</button>
   </form>
-
-  <!-- Result + Loader -->
   <div id="result" class="loading">
-    <div class="spinner"></div>
-    <span>Loading model...</span>
+    <div class="spinner"></div><span>Loading model...</span>
   </div>
 
-  <script type="text/javascript">
-    // === 1. Load .pkl as base64 ===
-    async function loadPklBase64(filename) {
-      const resp = await fetch(filename);
-      if (!resp.ok) throw new Error(`404: ${filename} not found`);
-      const blob = await resp.blob();
-      return new Promise((resolve) => {
+  <script>
+    async function loadPklBase64(f) {
+      const r = await fetch(f);
+      if (!r.ok) throw new Error(`404: ${f}`);
+      const blob = await r.blob();
+      return new Promise(res => {
         const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onload = () => res(reader.result.split(',')[1]);
         reader.readAsDataURL(blob);
       });
     }
 
-    // === 2. Main setup ===
-    let pyodide, predictFn, genderOptions;
+    let pyodide, predict, genderOptions;
 
     async function main() {
-      const resultDiv = document.getElementById("result");
+      const result = document.getElementById("result");
+      result.innerHTML = `<div class="spinner"></div><span>Loading Pyodide...</span>`;
 
-      try {
-        resultDiv.innerHTML = `<div class="spinner"></div><span>Loading Pyodide...</span>`;
+      pyodide = await loadPyodide();
+      await pyodide.loadPackage(["micropip", "numpy"]);
+      const micropip = pyodide.pyimport("micropip");
+      await micropip.install("scikit-learn==1.4.2");  // Match training version
 
-        pyodide = await loadPyodide();
-        await pyodide.loadPackage(["micropip", "numpy"]);
-        const micropip = pyodide.pyimport("micropip");
-        await micropip.install("scikit-learn");
+      result.innerHTML = `<div class="spinner"></div><span>Loading model...</span>`;
 
-        resultDiv.innerHTML = `<div class="spinner"></div><span>Loading model files...</span>`;
+      const [mB64, sB64, gB64, meansB64] = await Promise.all([
+        loadPklBase64("diabetes_model.pkl"),
+        loadPklBase64("scaler.pkl"),
+        loadPklBase64("le_gender.pkl"),
+        loadPklBase64("column_means.pkl")
+      ]);
 
-        const [modelB64, scalerB64, leGenderB64, meansB64] = await Promise.all([
-          loadPklBase64("diabetes_model.pkl"),
-          loadPklBase64("scaler.pkl"),
-          loadPklBase64("le_gender.pkl"),
-          loadPklBase64("column_means.pkl")
-        ]);
-
-        const pythonCode = `
+      const code = `
 import joblib, numpy as np, io, base64
-
-def decode(b64): return base64.b64decode(b64)
-
-model = joblib.load(io.BytesIO(decode("${modelB64}")))
-scaler = joblib.load(io.BytesIO(decode("${scalerB64}")))
-le_gender = joblib.load(io.BytesIO(decode("${leGenderB64}")))
-means = joblib.load(io.BytesIO(decode("${meansB64}")))
-
+def d(b): return base64.b64decode(b)
+model = joblib.load(io.BytesIO(d("${mB64}")))
+scaler = joblib.load(io.BytesIO(d("${sB64}")))
+le_gender = joblib.load(io.BytesIO(d("${gB64}")))
+means = joblib.load(io.BytesIO(d("${meansB64}")))
 gender_options = [str(g).strip().upper() for g in le_gender.classes_]
 
 def predict_diabetes(age, gender, hba1c):
-    try:
-        g_enc = le_gender.transform([gender])[0]
-        row = np.array([[
-            g_enc, age,
-            means['Urea'], means['Cr'],
-            hba1c,
-            means['Chol'], means['TG'],
-            means['HDL'], means['LDL'],
-            means['VLDL'], means['BMI']
-        ]])
-        row_scaled = scaler.transform(row)
-        pred = model.predict(row_scaled)[0]
-        return "Yes" if int(pred) == 1 else "No"
-    except Exception as e:
-        return f"Error: {str(e)}"
+    g_enc = le_gender.transform([gender])[0]
+    row = np.array([[g_enc, age, means['Urea'], means['Cr'], hba1c,
+                     means['Chol'], means['TG'], means['HDL'], means['LDL'],
+                     means['VLDL'], means['BMI']]], dtype=float)
+    row_scaled = scaler.transform(row)
+    pred = model.predict(row_scaled)[0]
+    return "Yes" if int(pred) == 1 else "No"
 
 predict_diabetes, gender_options
-        `;
+      `;
 
-        const [predictPy, genderPy] = pyodide.runPython(pythonCode);
-        window.predict = predictPy;
-        genderOptions = genderPy.toJs();
+      const [p, g] = pyodide.runPython(code);
+      window.predict = p;
+      genderOptions = g.toJs();
 
-        // Populate gender
-        const genderSelect = document.getElementById("gender");
-        genderSelect.innerHTML = "";
-        genderOptions.forEach(g => {
-          const opt = document.createElement("option");
-          opt.value = g;
-          opt.textContent = g;
-          genderSelect.appendChild(opt);
-        });
+      const sel = document.getElementById("gender");
+      sel.innerHTML = "";
+      genderOptions.forEach(opt => {
+        const o = document.createElement("option");
+        o.value = o.textContent = opt;
+        sel.appendChild(o);
+      });
 
-        resultDiv.innerHTML = "Ready! Enter values and predict.";
-        resultDiv.className = "";
-
-      } catch (err) {
-        resultDiv.innerHTML = `Init failed: ${err.message}`;
-        resultDiv.className = "";
-      }
+      result.innerHTML = "Ready! Enter values.";
+      result.className = "";
     }
 
-    // === 3. Prediction with spinner ===
-    document.getElementById("predictForm").onsubmit = async (e) => {
+    document.getElementById("predictForm").onsubmit = async e => {
       e.preventDefault();
-      const resultDiv = document.getElementById("result");
-
-      // Show spinner
-      resultDiv.innerHTML = `<div class="spinner"></div><span>Predicting...</span>`;
-      resultDiv.className = "loading";
+      const r = document.getElementById("result");
+      r.innerHTML = `<div class="spinner"></div><span>Predicting...</span>`;
+      r.className = "loading";
 
       try {
         const age = parseInt(document.getElementById("age").value);
         const gender = document.getElementById("gender").value;
         const hba1c = parseFloat(document.getElementById("hba1c").value);
-
-        const prediction = window.predict(age, gender, hba1c);
-
-        // Show result
-        resultDiv.innerHTML = `Diabetes: ${prediction}`;
-        resultDiv.className = prediction === "Yes" ? "yes" : "no";
-
+        const res = window.predict(age, gender, hba1c);
+        r.innerHTML = `Diabetes: ${res}`;
+        r.className = res === "Yes" ? "yes" : "no";
       } catch (err) {
-        resultDiv.innerHTML = `Error: ${err.message}`;
-        resultDiv.className = "";
+        r.innerHTML = `Error: ${err.message}`;
+        r.className = "";
       }
     };
 
-    // Start
-    main();
+    main().catch(e => {
+      document.getElementById("result").innerHTML = `Init failed: ${e.message}`;
+    });
   </script>
 </body>
 </html>
