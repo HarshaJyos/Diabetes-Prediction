@@ -25,7 +25,9 @@
     <input type="number" id="age" min="1" max="120" value="30" required />
 
     <label>Gender</label>
-    <select id="gender" required></select>
+    <select id="gender" required>
+      <!-- Populated by JS -->
+    </select>
 
     <label>HbA1c (%)</label>
     <input type="number" id="hba1c" min="0" max="20" step="0.1" value="5.0" required />
@@ -34,72 +36,97 @@
   </form>
   <div id="result" class="loading">Loading model...</div>
 
-  <script>
-    let pyodide;
-    let model, scaler, le_gender, means;
+  <script type="text/javascript">
+    // === 1. Load all .pkl files as base64 ===
+    async function loadPklBase64(filename) {
+      const resp = await fetch(filename);
+      if (!resp.ok) throw new Error(`404: ${filename} not found`);
+      const blob = await resp.blob();
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]); // base64 part
+        reader.readAsDataURL(blob);
+      });
+    }
 
-    // Load Pyodide + required packages
+    // === 2. Main Pyodide setup ===
+    let pyodide, predictFn, genderOptions;
+
     async function main() {
+      const resultDiv = document.getElementById("result");
+      resultDiv.textContent = "Loading Pyodide...";
+
       pyodide = await loadPyodide();
-      await pyodide.loadPackage(["numpy", "micropip"]);
+      await pyodide.loadPackage(["micropip", "numpy"]);
       const micropip = pyodide.pyimport("micropip");
       await micropip.install("scikit-learn");
 
-      // Load .pkl files as base64 (embedded via Python)
-      const files = ['diabetes_model.pkl', 'scaler.pkl', 'le_gender.pkl', 'column_means.pkl'];
-      const loaded = {};
-      for (const f of files) {
-        const resp = await fetch(f);
-        const buffer = new Uint8Array(await resp.arrayBuffer());
-        loaded[f] = buffer;
-      }
+      resultDiv.textContent = "Loading model files...";
 
-      // Run prediction code in Pyodide
-      pyodide.runPython(`
-import joblib, numpy as np, io
+      // Load all .pkl as base64
+      const [modelB64, scalerB64, leGenderB64, meansB64] = await Promise.all([
+        loadPklBase64("diabetes_model.pkl"),
+        loadPklBase64("scaler.pkl"),
+        loadPklBase64("le_gender.pkl"),
+        loadPklBase64("column_means.pkl")
+      ]);
 
-# Load from binary
-model = joblib.load(io.BytesIO(${new Uint8Array(loaded['diabetes_model.pkl'])}))
-scaler = joblib.load(io.BytesIO(${new Uint8Array(loaded['scaler.pkl'])}))
-le_gender = joblib.load(io.BytesIO(${new Uint8Array(loaded['le_gender.pkl'])}))
-means = joblib.load(io.BytesIO(${new Uint8Array(loaded['column_means.pkl'])}))
+      // === 3. Python code to load models ===
+      const pythonCode = `
+import joblib, numpy as np, io, base64
+
+# Decode base64 to bytes
+def decode(b64):
+    return base64.b64decode(b64)
+
+model = joblib.load(io.BytesIO(decode("${modelB64}")))
+scaler = joblib.load(io.BytesIO(decode("${scalerB64}")))
+le_gender = joblib.load(io.BytesIO(decode("${leGenderB64}")))
+means = joblib.load(io.BytesIO(decode("${meansB64}")))
+
+# Export gender options
+gender_options = [str(g).strip().upper() for g in le_gender.classes_]
 
 def predict_diabetes(age, gender, hba1c):
-    g_enc = le_gender.transform([gender])[0]
-    row = np.array([[
-        g_enc, age,
-        means['Urea'], means['Cr'],
-        hba1c,
-        means['Chol'], means['TG'],
-        means['HDL'], means['LDL'],
-        means['VLDL'], means['BMI']
-    ]])
-    row_scaled = scaler.transform(row)
-    pred = model.predict(row_scaled)[0]
-    return "Yes" if pred == 1 else "No"
-      `);
+    try:
+        g_enc = le_gender.transform([gender])[0]
+        row = np.array([[
+            g_enc, age,
+            means['Urea'], means['Cr'],
+            hba1c,
+            means['Chol'], means['TG'],
+            means['HDL'], means['LDL'],
+            means['VLDL'], means['BMI']
+        ]])
+        row_scaled = scaler.transform(row)
+        pred = model.predict(row_scaled)[0]
+        return "Yes" if int(pred) == 1 else "No"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
-      model = pyodide.globals.get("model");
-      scaler = pyodide.globals.get("scaler");
-      le_gender = pyodide.globals.get("le_gender");
-      means = pyodide.globals.get("means");
-      window.predict = pyodide.globals.get("predict_diabetes");
+# Make available to JS
+predict_diabetes, gender_options
+      `;
 
-      // Populate gender dropdown
+      const [predictPy, genderPy] = pyodide.runPython(pythonCode);
+      window.predict = predictPy;
+      genderOptions = genderPy.toJs();
+
+      // === 4. Populate gender dropdown ===
       const genderSelect = document.getElementById("gender");
-      const classes = le_gender.classes_.toJs();
-      classes.forEach(g => {
+      genderSelect.innerHTML = ""; // clear
+      genderOptions.forEach(g => {
         const opt = document.createElement("option");
-        opt.value = g.toUpperCase();
-        opt.textContent = g.toUpperCase();
+        opt.value = g;
+        opt.textContent = g;
         genderSelect.appendChild(opt);
       });
 
-      document.getElementById("result").textContent = "Ready! Enter values and predict.";
-      document.getElementById("result").className = "";
+      resultDiv.textContent = "Ready! Enter values and predict.";
+      resultDiv.className = "";
     }
 
-    // Form submit
+    // === 5. Form submit ===
     document.getElementById("predictForm").onsubmit = async (e) => {
       e.preventDefault();
       const resultDiv = document.getElementById("result");
@@ -113,15 +140,17 @@ def predict_diabetes(age, gender, hba1c):
 
         const prediction = window.predict(age, gender, hba1c);
         resultDiv.textContent = `Diabetes: ${prediction}`;
-        resultDiv.className = prediction === "Yes" ? "yes" : "no";
+        resultDiv.className = prediction.includes("Yes") ? "yes" : "no";
       } catch (err) {
         resultDiv.textContent = `Error: ${err.message}`;
         resultDiv.className = "";
       }
     };
 
-    // Start loading
-    main();
+    // Start
+    main().catch(err => {
+      document.getElementById("result").textContent = `Init failed: ${err.message}`;
+    });
   </script>
 </body>
 </html>
